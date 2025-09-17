@@ -12,6 +12,10 @@ import { getLocalStorageItem, setLocalStorageItem } from "@/lib/jivana-storage"
 import { PlusCircle, CheckCircle, Undo2, Trash2 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { cn } from "@/lib/utils"
+import { useJivana } from "../components/jivana-provider"
+import { supabase } from "@/lib/supabaseClient"
+
+type HabitStatus = "active" | "done"
 
 interface Habit {
   id: string
@@ -19,11 +23,15 @@ interface Habit {
   description: string
   targetFrequency: string // e.g., "7 days/week" or "Custom"
   startDate: string // YYYY-MM-DD
-  completionDates: string[] // Array of YYYY-MM-DD
+  completionDates: string[] // local-only history of YYYY-MM-DD
+  streak: number
+  status: HabitStatus
 }
 
 export default function HabitsPage() {
   const { toast } = useToast()
+  const { walletId } = useJivana()
+
   const [habits, setHabits] = useState<Habit[]>([])
   const [isAddHabitModalOpen, setIsAddHabitModalOpen] = useState(false)
   const [newHabitName, setNewHabitName] = useState("")
@@ -31,79 +39,85 @@ export default function HabitsPage() {
   const [newHabitFrequency, setNewHabitFrequency] = useState("7 days/week")
   const [newHabitStartDate, setNewHabitStartDate] = useState(new Date().toISOString().split("T")[0])
 
+  // ---------- Helpers ----------
+  const toHabitStatus = (s: unknown): HabitStatus => (s === "done" ? "done" : "active")
+
+  const normalizeHabit = (h: Partial<Habit>): Habit => ({
+    id: String(h.id ?? `temp-${Date.now()}`),
+    name: String(h.name ?? ""),
+    description: String(h.description ?? ""),
+    targetFrequency: String(h.targetFrequency ?? "7 days/week"),
+    startDate: String(h.startDate ?? new Date().toISOString().split("T")[0]),
+    completionDates: Array.isArray(h.completionDates) ? h.completionDates : [],
+    streak: typeof h.streak === "number" ? h.streak : 0,
+    status: toHabitStatus(h.status),
+  })
+
+  // ---------- Local load + Supabase hydration ----------
   const loadHabits = useCallback(() => {
-    setHabits(getLocalStorageItem("jivana-habits", []))
+    const local = getLocalStorageItem<Habit[]>("jivana-habits", [])
+    const normalized = (local ?? []).map((h) =>
+      normalizeHabit({
+        ...h,
+        status: toHabitStatus(h.status),
+      }),
+    )
+    setHabits(normalized)
   }, [])
+
+  const fetchHabitsFromSupabase = useCallback(async () => {
+    if (!walletId) return
+    const { data, error } = await supabase
+      .from("Habit")
+      .select("id, habit_title, description, target, startdate, streak, Status")
+      .eq("wallet_id", walletId)
+      .order("created_at", { ascending: true })
+
+    if (error) {
+      console.error(error)
+      toast({ title: "Failed to load habits from Supabase", variant: "destructive" })
+      return
+    }
+
+    if (data) {
+      setHabits((prevLocal) => {
+        const merged: Habit[] = data.map((row: any) => {
+          const localMatch = prevLocal.find((l) => l.id === String(row.id))
+          return normalizeHabit({
+            id: String(row.id),
+            name: String(row.habit_title ?? localMatch?.name ?? ""),
+            description: String(row.description ?? localMatch?.description ?? ""),
+            targetFrequency: String(row.target ?? localMatch?.targetFrequency ?? "7 days/week"),
+            startDate: String(row.startdate ?? localMatch?.startDate ?? new Date().toISOString().split("T")[0]),
+            completionDates: localMatch?.completionDates ?? [],
+            streak: typeof row.streak === "number" ? row.streak : (localMatch?.streak ?? 0),
+            status: toHabitStatus(row.Status),
+          })
+        })
+        setLocalStorageItem("jivana-habits", merged)
+        return merged
+      })
+    }
+  }, [walletId, toast])
 
   useEffect(() => {
     loadHabits()
   }, [loadHabits])
 
-  const handleAddHabit = () => {
-    if (newHabitName.trim() === "") {
-      toast({ title: "Habit name cannot be empty.", variant: "destructive" })
-      return
-    }
-    const newId = `habit-${Date.now()}`
-    const newHabit: Habit = {
-      id: newId,
-      name: newHabitName.trim(),
-      description: newHabitDescription.trim(),
-      targetFrequency: newHabitFrequency,
-      startDate: newHabitStartDate,
-      streak: 0, // Streak will be computed dynamically or updated separately
-      completionDates: [],
-    }
-    const updatedHabits = [...habits, newHabit]
-    setHabits(updatedHabits)
-    setLocalStorageItem("jivana-habits", updatedHabits)
-    setIsAddHabitModalOpen(false)
-    setNewHabitName("")
-    setNewHabitDescription("")
-    setNewHabitFrequency("7 days/week")
-    setNewHabitStartDate(new Date().toISOString().split("T")[0])
-    toast({ title: "Habit added!", description: newHabit.name })
-  }
+  useEffect(() => {
+    void fetchHabitsFromSupabase()
+  }, [fetchHabitsFromSupabase])
 
-  const handleToggleHabitCompletion = (id: string) => {
-    const today = new Date().toISOString().split("T")[0]
-    const updatedHabits = habits.map((habit) => {
-      if (habit.id === id) {
-        const isCompletedToday = habit.completionDates.includes(today)
-        const newCompletionDates = isCompletedToday
-          ? habit.completionDates.filter((date) => date !== today)
-          : [...habit.completionDates, today].sort() // Keep dates sorted
-        return { ...habit, completionDates: newCompletionDates }
-      }
-      return habit
-    })
-    setHabits(updatedHabits)
-    setLocalStorageItem("jivana-habits", updatedHabits)
-    const habitName = updatedHabits.find((h) => h.id === id)?.name
-    const isNowCompleted = updatedHabits.find((h) => h.id === id)?.completionDates.includes(today)
-    toast({ title: `Habit ${isNowCompleted ? "completed" : "undone"}!`, description: habitName })
-  }
-
-  const handleDeleteHabit = (id: string) => {
-    if (window.confirm("Are you sure you want to delete this habit?")) {
-      const updatedHabits = habits.filter((habit) => habit.id !== id)
-      setHabits(updatedHabits)
-      setLocalStorageItem("jivana-habits", updatedHabits)
-      toast({ title: "Habit deleted!", variant: "destructive" })
-    }
-  }
-
+  // ---------- Streak ----------
   const calculateStreak = (habit: Habit): number => {
     if (!habit.completionDates || habit.completionDates.length === 0) return 0
 
     let streak = 0
     const currentDate = new Date()
-    currentDate.setHours(0, 0, 0, 0) // Normalize to start of day
+    currentDate.setHours(0, 0, 0, 0)
 
-    // Check if today is completed
     const todayString = currentDate.toISOString().split("T")[0]
     if (!habit.completionDates.includes(todayString)) {
-      // If not completed today, check yesterday
       currentDate.setDate(currentDate.getDate() - 1)
     }
 
@@ -113,31 +127,201 @@ export default function HabitsPage() {
         streak++
         currentDate.setDate(currentDate.getDate() - 1)
       } else {
-        // Check if the gap is due to a future date or a real break
-        const habitStartDate = new Date(habit.startDate)
-        habitStartDate.setHours(0, 0, 0, 0)
-
-        if (currentDate.getTime() < habitStartDate.getTime()) {
-          // We've gone before the start date, so streak ends here
-          break
-        }
-
-        // If it's a day after the start date and not completed, streak breaks
-        if (currentDate.getTime() >= habitStartDate.getTime()) {
-          break
-        }
+        break
       }
     }
     return streak
   }
 
+  // ---------- Supabase sync helpers ----------
+  const saveHabitToSupabase = async (h: Habit, tempId?: string) => {
+    if (!walletId) return
+    const { data, error } = await supabase
+      .from("Habit")
+      .insert([
+        {
+          wallet_id: walletId,
+          habit_title: h.name,
+          description: h.description,
+          target: h.targetFrequency,
+          startdate: h.startDate,
+          todaysummary: "Pending",
+          streak: 0,
+          Status: "active",
+          created_at: new Date().toISOString(),
+        },
+      ])
+      .select("id, habit_title, description, target, startdate, streak, Status")
+      .single()
+
+    if (error) {
+      console.error(error)
+      toast({ title: "Failed to save habit to Supabase", variant: "destructive" })
+      return
+    }
+
+    if (data && tempId) {
+      const realId = String(data.id)
+      setHabits((prev): Habit[] => {
+        const swapped = prev.map((x): Habit =>
+          x.id === tempId
+            ? {
+                id: realId,
+                name: String(data.habit_title ?? x.name),
+                description: String(data.description ?? x.description),
+                targetFrequency: String(data.target ?? x.targetFrequency),
+                startDate: String(data.startdate ?? x.startDate),
+                completionDates: x.completionDates,
+                streak: typeof data.streak === "number" ? data.streak : x.streak,
+                status: toHabitStatus(data.Status),
+              }
+            : x,
+        )
+        setLocalStorageItem("jivana-habits", swapped)
+        return swapped
+      })
+    }
+  }
+
+  const updateHabitSummaryInSupabase = async (
+    id: string,
+    todaysummary: string,
+    streak: number,
+    status: HabitStatus,
+  ) => {
+    if (!walletId || id.startsWith("temp-")) return
+    const dbId = Number(id)
+    if (Number.isNaN(dbId)) return
+    const { error } = await supabase
+      .from("Habit")
+      .update({
+        todaysummary,
+        streak,
+        Status: status,
+      })
+      .eq("id", dbId)
+      .eq("wallet_id", walletId)
+
+    if (error) {
+      console.error(error)
+      toast({ title: "Failed to update habit in Supabase", variant: "destructive" })
+    }
+  }
+
+  const deleteHabitInSupabase = async (id: string) => {
+    if (!walletId || id.startsWith("temp-")) return
+    const dbId = Number(id)
+    if (Number.isNaN(dbId)) return
+    const { error } = await supabase.from("Habit").delete().eq("id", dbId).eq("wallet_id", walletId)
+    if (error) {
+      console.error(error)
+      toast({ title: "Failed to delete habit in Supabase", variant: "destructive" })
+    }
+  }
+
+  // ---------- UI handlers ----------
+  const handleAddHabit = async () => {
+    if (newHabitName.trim() === "") {
+      toast({ title: "Habit name cannot be empty.", variant: "destructive" })
+      return
+    }
+    const tempId = `temp-${Date.now()}`
+    const newHabit: Habit = {
+      id: tempId,
+      name: newHabitName.trim(),
+      description: newHabitDescription.trim(),
+      targetFrequency: newHabitFrequency,
+      startDate: newHabitStartDate,
+      completionDates: [],
+      streak: 0,
+      status: "active",
+    }
+
+    const updatedHabits: Habit[] = [...habits, newHabit]
+    setHabits(updatedHabits)
+    setLocalStorageItem("jivana-habits", updatedHabits)
+    setIsAddHabitModalOpen(false)
+    setNewHabitName("")
+    setNewHabitDescription("")
+    setNewHabitFrequency("7 days/week")
+    setNewHabitStartDate(new Date().toISOString().split("T")[0])
+    toast({ title: "Habit added!", description: newHabit.name })
+
+    if (walletId) {
+      await saveHabitToSupabase(newHabit, tempId)
+    } else {
+      toast({
+        title: "Wallet not connected",
+        description: "Connect on Home to sync habits with Supabase.",
+        variant: "default",
+      })
+    }
+  }
+
+  const handleToggleHabitCompletion = async (id: string) => {
+    const todayStr = new Date().toISOString().split("T")[0]
+    let targetHabit: Habit | undefined
+    let nowCompleted = false
+
+    const updatedHabits = habits.map((habit) => {
+      if (habit.id === id) {
+        const isCompletedToday = habit.completionDates.includes(todayStr)
+        const newCompletionDates = isCompletedToday
+          ? habit.completionDates.filter((d) => d !== todayStr)
+          : [...habit.completionDates, todayStr].sort()
+        nowCompleted = !isCompletedToday
+        const updated: Habit = {
+          ...habit,
+          completionDates: newCompletionDates,
+          status: nowCompleted ? "done" : "active",
+        }
+        targetHabit = updated
+        return updated
+      }
+      return habit
+    })
+
+    setHabits(updatedHabits)
+    setLocalStorageItem("jivana-habits", updatedHabits)
+
+    const hName = updatedHabits.find((h) => h.id === id)?.name ?? "Habit"
+    toast({ title: `Habit ${nowCompleted ? "completed" : "undone"}!`, description: hName })
+
+    // Update streak + summary + Status in Supabase
+    if (targetHabit) {
+      const newStreak = calculateStreak(targetHabit)
+      setHabits((prev): Habit[] => {
+        const withStreak = prev.map((h): Habit =>
+          h.id === targetHabit!.id ? { ...h, streak: newStreak, status: targetHabit!.status } : h,
+        )
+        setLocalStorageItem("jivana-habits", withStreak)
+        return withStreak
+      })
+
+      const todaysummary = nowCompleted ? "Completed today" : "Pending today"
+      await updateHabitSummaryInSupabase(id, todaysummary, newStreak, targetHabit.status)
+    }
+  }
+
+  const handleDeleteHabit = async (id: string) => {
+    if (!window.confirm("Are you sure you want to delete this habit?")) return
+
+    const updatedHabits: Habit[] = habits.filter((habit) => habit.id !== id)
+    setHabits(updatedHabits)
+    setLocalStorageItem("jivana-habits", updatedHabits)
+    toast({ title: "Habit deleted!", variant: "destructive" })
+
+    await deleteHabitInSupabase(id)
+  }
+
+  // ---------- UI ----------
   const today = new Date().toISOString().split("T")[0]
   const completedTodayCount = habits.filter((habit) => habit.completionDates.includes(today)).length
 
   return (
     <div className="space-y-8">
-      <h1 className="text-3xl font-semibold text-jivana-text-slate-900 text-white">Habits & Reminders</h1>
-      <p className="text-jivana-text-slate-700 text-lg text-white">Track your daily routines and build consistency.</p>
+      <h1 className="text-3xl font-semibold text-jivana-text-slate-900 text-green">Habits & Reminders</h1>
+      <p className="text-jivana-text-slate-700 text-lg text-green">Track your daily routines and build consistency.</p>
 
       {/* Today's Summary */}
       <Card className="bg-jivana-card rounded-2xl shadow-md border border-jivana-text-slate-700/10">

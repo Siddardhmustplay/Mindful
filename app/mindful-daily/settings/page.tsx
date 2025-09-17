@@ -70,7 +70,7 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-8">
-      <h1 className="text-3xl font-semibold text-jivana-text-slate-900 text-white">Settings</h1>
+      <h1 className="text-3xl font-semibold text-jivana-text-slate-900 text-green">Settings</h1>
 
       <Button onClick={handleSaveSettings} className="bg-jivana-primary hover:bg-jivana-primary/90 text-white">
         Save Settings

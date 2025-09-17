@@ -12,13 +12,17 @@ import {
   generateDailyDigestContent,
   defaultNotificationSettings,
 } from "@/lib/jivana-notifications"
+import { getLocalStorageItem, setLocalStorageItem } from "@/lib/jivana-storage"
 
 interface JivanaContextType {
   notificationSettings: typeof defaultNotificationSettings
   updateNotificationSettings: (updates: Partial<typeof defaultNotificationSettings>) => void
   sendTestNotification: () => void
-  // Add other global states/functions here as needed
   refreshAllData: () => void
+
+  // NEW: wallet support
+  walletId: string | null
+  setWalletId: (w: string | null) => void
 }
 
 const JivanaContext = createContext<JivanaContextType | undefined>(undefined)
@@ -29,9 +33,16 @@ export const JivanaProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     useState<typeof defaultNotificationSettings>(defaultNotificationSettings)
   const notificationIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
-  // Load settings on mount
+  // NEW: wallet state
+  const [walletId, setWalletIdState] = useState<string | null>(null)
+
+  // Load settings + wallet on mount
   useEffect(() => {
     setNotificationSettings(getNotificationSettings())
+
+    // Load walletId from localStorage (if present)
+    const storedWallet = getLocalStorageItem<string | null>("jivana-wallet-id", null)
+    if (storedWallet) setWalletIdState(storedWallet)
   }, [])
 
   // Save settings and reschedule notifications when settings change
@@ -57,11 +68,7 @@ export const JivanaProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           body: digestContent,
           icon: "/placeholder.svg?height=64&width=64",
         })
-        // To prevent multiple notifications within the same minute,
-        // we can set a flag or ensure the interval is long enough.
-        // For simplicity, this will trigger once per minute if the time matches.
       }
-      // Implement per-feature reminders here if needed, distributing them throughout the day.
     }, 60 * 1000) // Check every minute
   }, [notificationSettings])
 
@@ -101,14 +108,19 @@ export const JivanaProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   }, [notificationSettings, toast])
 
   const refreshAllData = useCallback(() => {
-    // This function would trigger re-fetches or re-randomizations for all pages
-    // For now, it's a placeholder. Individual pages will handle their own refresh.
+    // Placeholder: trigger re-fetches or re-randomizations for all pages
     toast({
       title: "Data Refreshed",
       description: "All dynamic content has been updated.",
       variant: "default",
     })
   }, [toast])
+
+  // NEW: setter that also persists to localStorage
+  const setWalletId = useCallback((w: string | null) => {
+    setWalletIdState(w)
+    setLocalStorageItem("jivana-wallet-id", w)
+  }, [])
 
   return (
     <JivanaContext.Provider
@@ -117,6 +129,9 @@ export const JivanaProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         updateNotificationSettings,
         sendTestNotification,
         refreshAllData,
+        // NEW
+        walletId,
+        setWalletId,
       }}
     >
       {children}

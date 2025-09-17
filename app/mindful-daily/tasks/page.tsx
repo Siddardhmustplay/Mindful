@@ -13,29 +13,45 @@ import { getLocalStorageItem, setLocalStorageItem } from "@/lib/jivana-storage"
 import { Trash2, Edit, Save, PlusCircle, Calendar, NotebookPen } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useToast } from "@/hooks/use-toast"
+import { useJivana } from "../components/jivana-provider"
+import { supabase } from "@/lib/supabaseClient"
+
+type TaskStatus = "todo" | "completed"
+type TaskPriority = "High" | "Medium" | "Low"
 
 interface Task {
-  id: string
+  id: string              // DB BIGINT ids stored as strings in UI
   title: string
-  priority: "High" | "Medium" | "Low"
-  status: "todo" | "completed"
+  priority: TaskPriority
+  status: TaskStatus
 }
 
 interface Job {
-  id: string
-  date: string // YYYY-MM-DD
-  time: string // HH:MM
+  id: string              // DB BIGINT id as string (temp-... before insert returns)
+  date: string            // YYYY-MM-DD
+  time: string            // HH:MM
   title: string
+}
+
+// Helpers to coerce types safely
+function coerceStatus(s: unknown): TaskStatus {
+  return s === "completed" ? "completed" : "todo"
+}
+function coercePriority(p: unknown): TaskPriority {
+  return p === "High" || p === "Low" ? p : "Medium"
 }
 
 export default function TasksPage() {
   const { toast } = useToast()
+  const { walletId: ctxWallet } = useJivana()
+  const walletId: string | null = ctxWallet ?? getLocalStorageItem("jivana-wallet-id", null)
+
   const [tasks, setTasks] = useState<Task[]>([])
   const [newTaskTitle, setNewTaskTitle] = useState("")
-  const [newTaskPriority, setNewTaskPriority] = useState<"High" | "Medium" | "Low">("Medium")
+  const [newTaskPriority, setNewTaskPriority] = useState<TaskPriority>("Medium")
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null)
   const [editingTaskTitle, setEditingTaskTitle] = useState("")
-  const [editingTaskPriority, setEditingTaskPriority] = useState<"High" | "Medium" | "Low">("Medium")
+  const [editingTaskPriority, setEditingTaskPriority] = useState<TaskPriority>("Medium")
 
   const [jobs, setJobs] = useState<Job[]>([])
   const [newJobDate, setNewJobDate] = useState("")
@@ -45,43 +61,183 @@ export default function TasksPage() {
 
   const [notepadContent, setNotepadContent] = useState("")
 
+  // ---------- Local loaders (and normalization) ----------
   const loadTasks = useCallback(() => {
-    setTasks(getLocalStorageItem("jivana-tasks", []))
+    const local = getLocalStorageItem<Task[]>("jivana-tasks", [])
+    const normalized: Task[] = (local ?? []).map((t) => ({
+      id: String(t.id),
+      title: t.title,
+      priority: coercePriority(t.priority),
+      status: coerceStatus(t.status),
+    }))
+    setTasks(normalized)
   }, [])
 
   const loadJobs = useCallback(() => {
-    setJobs(getLocalStorageItem("jivana-jobs", []))
+    const local = getLocalStorageItem<Job[]>("jivana-jobs", [])
+    setJobs((local ?? []).map((j) => ({ ...j, id: String(j.id) })))
   }, [])
 
   const loadNotepad = useCallback(() => {
     setNotepadContent(getLocalStorageItem("jivana-notepad", ""))
   }, [])
 
+  // ---------- Supabase hydration ----------
+  const fetchTasksFromSupabase = useCallback(async () => {
+    if (!walletId) return
+    const { data, error } = await supabase
+      .from("tasks")
+      .select("id, task_name, priority, status")
+      .eq("wallet_id", walletId)
+      .order("created_at", { ascending: true })
+
+    if (error) {
+      console.error(error)
+      toast({ title: "Failed to load tasks from Supabase", variant: "destructive" })
+      return
+    }
+
+    if (data) {
+      const serverTasks: Task[] = data.map((row: any) => ({
+        id: String(row.id),
+        title: String(row.task_name ?? ""),
+        priority: coercePriority(row.priority),
+        status: coerceStatus(row.status),
+      }))
+      setTasks(serverTasks)
+      setLocalStorageItem("jivana-tasks", serverTasks)
+    }
+  }, [walletId, toast])
+
+  const fetchJobsFromSupabase = useCallback(async () => {
+    if (!walletId) return
+    const { data, error } = await supabase
+      .from("jobs")
+      .select("id, job_title, date, time")
+      .eq("wallet_id", walletId)
+      .order("created_at", { ascending: true })
+
+    if (error) {
+      console.error(error)
+      toast({ title: "Failed to load jobs from Supabase", variant: "destructive" })
+      return
+    }
+
+    if (data) {
+      const serverJobs: Job[] = data.map((row: any) => ({
+        id: String(row.id),
+        title: String(row.job_title ?? ""),
+        date: String(row.date ?? ""),
+        time: String(row.time ?? ""),
+      }))
+      setJobs(serverJobs)
+      setLocalStorageItem("jivana-jobs", serverJobs)
+    }
+  }, [walletId, toast])
+
+  const fetchNotepadFromSupabase = useCallback(async () => {
+    if (!walletId) return
+    const { data, error } = await supabase
+      .from("Notepad")
+      .select("note")
+      .eq("wallet_id", walletId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+
+    if (error) {
+      console.error(error)
+      toast({ title: "Failed to load notepad from Supabase", variant: "destructive" })
+      return
+    }
+
+    const latest = data?.[0]?.note ?? ""
+    setNotepadContent(latest)
+    setLocalStorageItem("jivana-notepad", latest)
+  }, [walletId, toast])
+
   useEffect(() => {
     loadTasks()
     loadJobs()
     loadNotepad()
-  }, [loadTasks, loadJobs, loadNotepad])
+    void fetchTasksFromSupabase()
+    void fetchJobsFromSupabase()
+    void fetchNotepadFromSupabase()
+  }, [
+    loadTasks,
+    loadJobs,
+    loadNotepad,
+    fetchTasksFromSupabase,
+    fetchJobsFromSupabase,
+    fetchNotepadFromSupabase,
+  ])
 
-  // --- Task Management ---
-  const handleAddTask = () => {
+  // ---------- Task Management ----------
+  const handleAddTask = async () => {
     if (newTaskTitle.trim() === "") {
       toast({ title: "Task title cannot be empty.", variant: "destructive" })
       return
     }
-    const newId = `task-${Date.now()}`
-    const newTask: Task = { id: newId, title: newTaskTitle.trim(), priority: newTaskPriority, status: "todo" }
-    const updatedTasks = [...tasks, newTask]
-    setTasks(updatedTasks)
-    setLocalStorageItem("jivana-tasks", updatedTasks)
+    const tempId = `temp-${Date.now()}`
+    const newTask: Task = { id: tempId, title: newTaskTitle.trim(), priority: newTaskPriority, status: "todo" }
+
+    const optimistic: Task[] = [...tasks, newTask]
+    setTasks(optimistic)
+    setLocalStorageItem("jivana-tasks", optimistic)
     setNewTaskTitle("")
     setNewTaskPriority("Medium")
     toast({ title: "Task added!", description: newTask.title })
+
+    if (walletId) {
+      const { data, error } = await supabase
+        .from("tasks")
+        .insert([
+          {
+            wallet_id: walletId,
+            task_name: newTask.title,
+            priority: newTask.priority,
+            status: newTask.status,
+            created_at: new Date().toISOString(),
+          },
+        ])
+        .select("id, task_name, priority, status")
+        .single()
+
+      if (error) {
+        console.error(error)
+        toast({ title: "Failed to save task to Supabase", variant: "destructive" })
+        return
+      }
+
+      if (data) {
+        const realId = String(data.id)
+        setTasks((prev) => {
+          const swapped: Task[] = prev.map((t) =>
+            t.id === tempId
+              ? {
+                  id: realId,
+                  title: String(data.task_name ?? t.title),
+                  priority: coercePriority(data.priority),
+                  status: coerceStatus(data.status),
+                }
+              : t,
+          )
+          setLocalStorageItem("jivana-tasks", swapped)
+          return swapped
+        })
+      }
+    } else {
+      toast({
+        title: "Wallet not connected",
+        description: "Connect on Home to sync tasks with Supabase.",
+        variant: "default",
+      })
+    }
   }
 
-  const handleToggleTaskStatus = (id: string, checked: boolean) => {
-    const updatedTasks = tasks.map((task) =>
-      task.id === id ? { ...task, status: checked ? "completed" : "todo" } : task,
+  const handleToggleTaskStatus = async (id: string, checked: boolean) => {
+    const nextStatus: TaskStatus = checked ? "completed" : "todo"
+    const updatedTasks: Task[] = tasks.map((task) =>
+      task.id === id ? { ...task, status: nextStatus } : task,
     )
     setTasks(updatedTasks)
     setLocalStorageItem("jivana-tasks", updatedTasks)
@@ -89,6 +245,21 @@ export default function TasksPage() {
       title: `Task ${checked ? "completed" : "reopened"}!`,
       description: updatedTasks.find((t) => t.id === id)?.title,
     })
+
+    if (walletId && !id.startsWith("temp-")) {
+      const dbId = Number(id)
+      if (!Number.isNaN(dbId)) {
+        const { error } = await supabase
+          .from("tasks")
+          .update({ status: nextStatus })
+          .eq("id", dbId)
+          .eq("wallet_id", walletId)
+        if (error) {
+          console.error(error)
+          toast({ title: "Failed to update task in Supabase", variant: "destructive" })
+        }
+      }
+    }
   }
 
   const handleEditTask = (task: Task) => {
@@ -97,30 +268,63 @@ export default function TasksPage() {
     setEditingTaskPriority(task.priority)
   }
 
-  const handleSaveTask = (id: string) => {
+  const handleSaveTask = async (id: string) => {
     if (editingTaskTitle.trim() === "") {
       toast({ title: "Task title cannot be empty.", variant: "destructive" })
       return
     }
-    const updatedTasks = tasks.map((task) =>
+    const updatedTasks: Task[] = tasks.map((task) =>
       task.id === id ? { ...task, title: editingTaskTitle.trim(), priority: editingTaskPriority } : task,
     )
     setTasks(updatedTasks)
     setLocalStorageItem("jivana-tasks", updatedTasks)
     setEditingTaskId(null)
     toast({ title: "Task updated!", description: editingTaskTitle })
-  }
 
-  const handleDeleteTask = (id: string) => {
-    if (window.confirm("Are you sure you want to delete this task?")) {
-      const updatedTasks = tasks.filter((task) => task.id !== id)
-      setTasks(updatedTasks)
-      setLocalStorageItem("jivana-tasks", updatedTasks)
-      toast({ title: "Task deleted!", variant: "destructive" })
+    if (walletId && !id.startsWith("temp-")) {
+      const dbId = Number(id)
+      if (!Number.isNaN(dbId)) {
+        const { error } = await supabase
+          .from("tasks")
+          .update({
+            task_name: editingTaskTitle.trim(),
+            priority: editingTaskPriority,
+          })
+          .eq("id", dbId)
+          .eq("wallet_id", walletId)
+        if (error) {
+          console.error(error)
+          toast({ title: "Failed to update task in Supabase", variant: "destructive" })
+        }
+      }
     }
   }
 
-  const getPriorityColor = (priority: "High" | "Medium" | "Low") => {
+  const handleDeleteTask = async (id: string) => {
+    if (!window.confirm("Are you sure you want to delete this task?")) return
+
+    const updatedTasks: Task[] = tasks.filter((task) => task.id !== id)
+    setTasks(updatedTasks)
+    setLocalStorageItem("jivana-tasks", updatedTasks)
+    toast({ title: "Task deleted!", variant: "destructive" })
+
+    if (walletId && !id.startsWith("temp-")) {
+      const dbId = Number(id)
+      if (!Number.isNaN(dbId)) {
+        const { error } = await supabase
+          .from("tasks")
+          .delete()
+          .eq("id", dbId)
+          .eq("wallet_id", walletId)
+        if (error) {
+          console.error(error)
+          toast({ title: "Failed to delete task in Supabase", variant: "destructive" })
+        }
+      }
+    }
+  }
+
+  const getPriorityColor = (priority: TaskPriority) => {
     switch (priority) {
       case "High":
         return "bg-jivana-danger text-white"
@@ -133,46 +337,130 @@ export default function TasksPage() {
     }
   }
 
-  // --- Job Schedule Management ---
-  const handleAddJob = () => {
+  // ---------- Job Schedule Management (now synced to Supabase) ----------
+  const handleAddJob = async () => {
     if (newJobTitle.trim() === "" || newJobDate.trim() === "" || newJobTime.trim() === "") {
       toast({ title: "All job fields are required.", variant: "destructive" })
       return
     }
-    const newId = `job-${Date.now()}`
-    const newJob: Job = { id: newId, title: newJobTitle.trim(), date: newJobDate, time: newJobTime }
-    const updatedJobs = [...jobs, newJob].sort((a, b) => {
+    const tempId = `temp-${Date.now()}`
+    const newJob: Job = { id: tempId, title: newJobTitle.trim(), date: newJobDate, time: newJobTime }
+    const updatedJobsLocal = [...jobs, newJob].sort((a, b) => {
       const dateTimeA = new Date(`${a.date}T${a.time}`)
       const dateTimeB = new Date(`${b.date}T${b.time}`)
       return dateTimeA.getTime() - dateTimeB.getTime()
     })
-    setJobs(updatedJobs)
-    setLocalStorageItem("jivana-jobs", updatedJobs)
+
+    setJobs(updatedJobsLocal)
+    setLocalStorageItem("jivana-jobs", updatedJobsLocal)
     setNewJobTitle("")
     setNewJobDate("")
     setNewJobTime("")
     setShowAddJobForm(false)
     toast({ title: "Job scheduled!", description: newJob.title })
-  }
 
-  const handleDeleteJob = (id: string) => {
-    if (window.confirm("Are you sure you want to delete this job?")) {
-      const updatedJobs = jobs.filter((job) => job.id !== id)
-      setJobs(updatedJobs)
-      setLocalStorageItem("jivana-jobs", updatedJobs)
-      toast({ title: "Job deleted!", variant: "destructive" })
+    if (walletId) {
+      const { data, error } = await supabase
+        .from("jobs")
+        .insert([
+          {
+            wallet_id: walletId,
+            job_title: newJob.title,
+            date: newJob.date,
+            time: newJob.time,
+            created_at: new Date().toISOString(),
+          },
+        ])
+        .select("id, job_title, date, time")
+        .single()
+
+      if (error) {
+        console.error(error)
+        toast({ title: "Failed to save job to Supabase", variant: "destructive" })
+        return
+      }
+
+      if (data) {
+        const realId = String(data.id)
+        setJobs((prev) => {
+          const replaced = prev
+            .map((j) =>
+              j.id === tempId
+                ? { id: realId, title: String(data.job_title ?? j.title), date: String(data.date ?? j.date), time: String(data.time ?? j.time) }
+                : j,
+            )
+            .sort((a, b) => new Date(`${a.date}T${a.time}`).getTime() - new Date(`${b.date}T${b.time}`).getTime())
+          setLocalStorageItem("jivana-jobs", replaced)
+          return replaced
+        })
+      }
+    } else {
+      toast({
+        title: "Wallet not connected",
+        description: "Connect on Home to sync jobs with Supabase.",
+        variant: "default",
+      })
     }
   }
 
-  // --- Notepad Management ---
-  const handleSaveNotepad = () => {
-    setLocalStorageItem("jivana-notepad", notepadContent)
-    toast({ title: "Notes saved!", description: "Your notepad content has been updated." })
+  const handleDeleteJob = async (id: string) => {
+    if (!window.confirm("Are you sure you want to delete this job?")) return
+
+    const updatedJobsLocal = jobs.filter((job) => job.id !== id)
+    setJobs(updatedJobsLocal)
+    setLocalStorageItem("jivana-jobs", updatedJobsLocal)
+    toast({ title: "Job deleted!", variant: "destructive" })
+
+    if (walletId && !id.startsWith("temp-")) {
+      const dbId = Number(id)
+      if (!Number.isNaN(dbId)) {
+        const { error } = await supabase
+          .from("jobs")
+          .delete()
+          .eq("id", dbId)
+          .eq("wallet_id", walletId)
+
+        if (error) {
+          console.error(error)
+          toast({ title: "Failed to delete job in Supabase", variant: "destructive" })
+        }
+      }
+    }
   }
 
+  // ---------- Notepad Management (now synced to Supabase) ----------
+  const handleSaveNotepad = async () => {
+    setLocalStorageItem("jivana-notepad", notepadContent)
+    toast({ title: "Notes saved!", description: "Your notepad content has been updated." })
+
+    if (walletId) {
+      const { error } = await supabase
+        .from("Notepad")
+        .insert([
+          {
+            wallet_id: walletId,
+            note: notepadContent,
+            created_at: new Date().toISOString(),
+          },
+        ])
+
+      if (error) {
+        console.error(error)
+        toast({ title: "Failed to save note to Supabase", variant: "destructive" })
+      }
+    } else {
+      toast({
+        title: "Wallet not connected",
+        description: "Connect on Home to sync notes with Supabase.",
+        variant: "default",
+      })
+    }
+  }
+
+  // ---------- UI ----------
   return (
     <div className="space-y-8">
-      <h1 className="text-3xl font-semibold text-jivana-text-slate-900 text-white">Tasks</h1>
+      <h1 className="text-3xl font-semibold text-jivana-text-slate-900 text-green">Tasks</h1>
 
       {/* New Task Input */}
       <Card className="bg-jivana-card rounded-2xl shadow-md border border-jivana-text-slate-700/10">
@@ -188,7 +476,7 @@ export default function TasksPage() {
           />
           <select
             value={newTaskPriority}
-            onChange={(e) => setNewTaskPriority(e.target.value as "High" | "Medium" | "Low")}
+            onChange={(e) => setNewTaskPriority(e.target.value as TaskPriority)}
             className="p-2 border rounded-md bg-jivana-background border-jivana-text-slate-700/20 text-jivana-text-slate-900 focus:ring-jivana-primary focus:border-jivana-primary"
           >
             <option value="High">High</option>
@@ -245,7 +533,7 @@ export default function TasksPage() {
                           />
                           <select
                             value={editingTaskPriority}
-                            onChange={(e) => setEditingTaskPriority(e.target.value as "High" | "Medium" | "Low")}
+                            onChange={(e) => setEditingTaskPriority(e.target.value as TaskPriority)}
                             className="p-2 border rounded-md bg-white border-jivana-text-slate-700/20 text-jivana-text-slate-900"
                           >
                             <option value="High">High</option>
@@ -335,7 +623,7 @@ export default function TasksPage() {
                             />
                             <select
                               value={editingTaskPriority}
-                              onChange={(e) => setEditingTaskPriority(e.target.value as "High" | "Medium" | "Low")}
+                              onChange={(e) => setEditingTaskPriority(e.target.value as TaskPriority)}
                               className="p-2 border rounded-md bg-white border-jivana-text-slate-700/20 text-jivana-text-slate-900"
                             >
                               <option value="High">High</option>

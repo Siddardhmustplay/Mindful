@@ -7,6 +7,8 @@ import { Progress } from "@/components/ui/progress"
 import { getLocalStorageItem, setLocalStorageItem } from "@/lib/jivana-storage"
 import { supabase } from "@/lib/supabaseClient"
 import { useJivana } from "../components/jivana-provider"
+export const dynamic = 'force-dynamic';
+
 
 interface Task {
   id: string
